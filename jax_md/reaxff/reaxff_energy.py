@@ -124,16 +124,17 @@ def calculate_reaxff_energy(species: Array,
   far_nbr_mask = (far_nbr_inds != N) & (atom_mask.reshape(-1,1)
                                         & atom_mask[far_nbr_inds])
   far_nbr_dists = far_nbr_dists * far_nbr_mask
-  tapered_dists = taper(far_nbr_dists, 0.0, 10.0)
-  tapered_dists = jnp.where((far_nbr_dists > 10.0) | (far_nbr_dists < 0.001),
-                            0.0,
-                            tapered_dists)
+  vdw_cou_dists = taper(far_nbr_dists, force_field.low_tap_rad, force_field.up_tap_rad)
+  vdw_cou_dists = jnp.where(far_nbr_dists < 0.001, 0.0, vdw_cou_dists)
+  vdw_cou_dists = jnp.where(vdw_cou_dists - (force_field.up_tap_rad - force_field.low_tap_rad) < vdw_cou_dists,
+                            jnp.where(far_nbr_dists > force_field.up_tap_rad, 0.0, vdw_cou_dists),
+                            vdw_cou_dists)
 
   # shared accross charge calc and coulomb
-  gamma = jnp.power(force_field.gamma.reshape(-1, 1), 3/2)
+  gamma = jnp.power(force_field.gamma.reshape(-1, 1), 3.0/2.0)
   gamma_mat = gamma * gamma.transpose()
   gamma_mat = gamma_mat[far_neigh_types, species.reshape(-1, 1)]
-  hulp1_mat = far_nbr_dists ** 3 + (1/gamma_mat)
+  hulp1_mat = far_nbr_dists ** 3.0 + (1.0/gamma_mat)
   hulp2_mat = jnp.power(hulp1_mat, 1.0/3.0) * far_nbr_mask
 
   if solver_model == "EEM":
@@ -141,7 +142,7 @@ def calculate_reaxff_energy(species: Array,
                                     atom_mask,
                                     far_nbr_inds,
                                     hulp2_mat,
-                                    tapered_dists,
+                                    vdw_cou_dists,
                                     force_field.idempotential,
                                     force_field.electronegativity,
                                     init_charges,
@@ -162,7 +163,7 @@ def calculate_reaxff_energy(species: Array,
                                     far_nbr_inds,
                                     hulp2_mat,
                                     bond_softness,
-                                    tapered_dists,
+                                    vdw_cou_dists,
                                     force_field.idempotential,
                                     force_field.electronegativity,
                                     total_charge,
@@ -181,7 +182,7 @@ def calculate_reaxff_energy(species: Array,
   cou_pot = calculate_coulomb_pot(far_nbr_inds,
                                   atom_mask,
                                   hulp2_mat,
-                                  tapered_dists,
+                                  vdw_cou_dists,
                                   charges[:-1])
   cou_pot += coulomb_acks2
   result_dict['E_coulomb'] = cou_pot
@@ -197,7 +198,7 @@ def calculate_reaxff_energy(species: Array,
                               far_nbr_mask,
                               far_nbr_inds,
                               far_nbr_dists,
-                              tapered_dists,
+                              vdw_cou_dists,
                               force_field)
   result_dict['E_vdw'] = vdw_pot
 
@@ -288,7 +289,7 @@ def calculate_eem_charges(species: Array,
                           atom_mask: Array,
                           nbr_inds: Array,
                           hulp2_mat: Array,
-                          tapered_dists: Array,
+                          dists: Array,
                           idempotential: Array,
                           electronegativity: Array,
                           init_charges: Array = None,
@@ -305,12 +306,12 @@ def calculate_eem_charges(species: Array,
   '''
 
   if backprop_solve == False:
-    tapered_dists = jax.lax.stop_gradient(tapered_dists)
+    dists = jax.lax.stop_gradient(dists)
     hulp2_mat = jax.lax.stop_gradient(hulp2_mat)
-  prev_dtype = tapered_dists.dtype
+  prev_dtype = dists.dtype
   N = len(species)
   # might cause nan issues if 0s not handled well
-  A = safe_mask(hulp2_mat != 0, lambda x: tapered_dists * 14.4 / x, hulp2_mat, 0.0)
+  A = safe_mask(hulp2_mat != 0, lambda x: dists * 14.4 / x, hulp2_mat, 0.0)
   my_idemp = idempotential[species]
   my_elect = electronegativity[species] * atom_mask
 
@@ -357,20 +358,20 @@ def calculate_acks2_charges(species: Array,
                           nbr_inds: Array,
                           hulp2_mat: Array,
                           bond_softness: Array,
-                          tapered_dists: Array,
+                          dists: Array,
                           idempotential: Array,
                           electronegativity: Array,
                           total_charge: float,
                           backprop_solve: bool = False,
                           tol: float = 1e-06):
   if backprop_solve == False:
-    tapered_dists = jax.lax.stop_gradient(tapered_dists)
+    dists = jax.lax.stop_gradient(dists)
     hulp2_mat = jax.lax.stop_gradient(hulp2_mat)
     bond_softness = jax.lax.stop_gradient(bond_softness)
-  prev_dtype = tapered_dists.dtype
+  prev_dtype = dists.dtype
   N = len(species)
   # might cause nan issues if 0s not handled well
-  A = jnp.where(hulp2_mat == 0, 0.0, tapered_dists * 14.4 / hulp2_mat)
+  A = jnp.where(hulp2_mat == 0, 0.0, dists * 14.4 / hulp2_mat)
   my_idemp = idempotential[species]
   my_elect = electronegativity[species]
   B = bond_softness
@@ -431,14 +432,14 @@ def calculate_acks2_charges(species: Array,
 def calculate_coulomb_pot(nbr_inds: Array,
                           atom_mask: Array,
                           hulp2_mat: Array,
-                          tapered_dists: Array,
+                          dists: Array,
                           charges: Array):
   N = len(atom_mask)
   mask = (atom_mask.reshape(-1, 1) * atom_mask[nbr_inds]) * (nbr_inds != N)
   charge_mat = charges.reshape(-1, 1) * charges[nbr_inds]
   eph_mat = safe_mask(mask,
                       lambda x: c1c * charge_mat / (x + 1e-20), hulp2_mat, 0.0)
-  ephtap_mat = eph_mat * tapered_dists * mask
+  ephtap_mat = eph_mat * dists * mask
   total_pot = high_precision_sum(ephtap_mat) / 2.0
 
   return total_pot
@@ -474,7 +475,7 @@ def calculate_vdw_pot(species: Array,
                       far_nbr_mask: Array,
                       nbr_inds: Array,
                       dists: Array,
-                      tapered_dists: Array,
+                      vdw_cou_dists: Array,
                       force_field: ForceField):
   N = len(species)
   neigh_types = species[nbr_inds]
@@ -495,7 +496,7 @@ def calculate_vdw_pot(species: Array,
   h1_mat = jnp.exp(temp_val2)
   h2_mat = jnp.exp(0.5 * temp_val2)
   ewh_mat = p2_mat * (h1_mat - 2.0 * h2_mat)
-  ewhtap_mat = ewh_mat * tapered_dists
+  ewhtap_mat = ewh_mat * vdw_cou_dists
   ewhtap_mat = ewhtap_mat * far_nbr_mask
   total_pot = high_precision_sum(ewhtap_mat) / 2.0
 
@@ -1297,10 +1298,12 @@ def taper(value, low_tap_rad, up_tap_rad):
   SW = jnp.where(R < low_tap_rad, 1.0,
                  jnp.where(R < up_tap_rad, SW, 0.0))
 
+  SW = jnp.where(value - (up_tap_rad - low_tap_rad) < value, SW, 1.0)
+
   return SW
 
 
-def taper_inc(dist, low_tap_rad=0, up_tap_rad=10):
+def taper_inc(dist, low_tap_rad, up_tap_rad):
   '''
   Increasing tapering function
   0 at low_tap_rad and 1 at up_tap_rad
