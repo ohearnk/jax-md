@@ -1293,7 +1293,7 @@ def taper(value, low_tap_rad, up_tap_rad):
   SWC0 = (-35.0*SWA3*SWB2*SWB2+21.0*SWA2*SWB3*SWB2 -
           7.0*SWA*SWB3*SWB3+SWB3*SWB3*SWB)
 
-  SW = (SWC7*R3*R3*R+SWC6*R3*R3+SWC5*R3*R2+SWC4*R2*R2+SWC3*R3+SWC2*R2 -
+  SW = (SWC7*R3*R3*R+SWC6*R3*R3+SWC5*R3*R2+SWC4*R2*R2+SWC3*R3+SWC2*R2+
       SWC1*R+SWC0) / D7
   SW = jnp.where(R < low_tap_rad, 1.0,
                  jnp.where(R < up_tap_rad, SW, 0.0))
